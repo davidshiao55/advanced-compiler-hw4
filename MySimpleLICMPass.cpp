@@ -46,40 +46,66 @@ namespace
 {
 class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
 {
+    bool hasLoopInvariantOperands(const Loop &L, const DenseSet<Value *> &LI, const Instruction &Inst)
+    {
+        for (const auto &Use : Inst.operands()) {
+            if (LI.contains(&*Use))
+                // Operand already marked LI
+                continue;
+
+            if (auto *UseInst = dyn_cast<Instruction>(&*Use)) {
+                if (L.contains(UseInst)) {
+                    // The def of this operand is inside the loop
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
   public:
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM,
                           LoopStandardAnalysisResults &AR, LPMUpdater &Updater)
     {
-        errs() << "HELLO WORLD!!!\n";
-        // Grab analyses that might be useful
         DominatorTree &DT = AR.DT;
-        LoopInfo &LI = AR.LI;
 
         // If the loop doesn't have a single preheader block, it's harder to do LICM.
         // In real LICM, we handle multiple preds or zero preds carefully.
         BasicBlock *Preheader = L.getLoopPreheader();
         if (!Preheader) {
-            errs() << "  [MySimpleLICM] No single loop preheader, skipping.\n";
+            errs() << "[MySimpleLICM] No single loop preheader, skipping.\n";
             return PreservedAnalyses::all();
         }
 
         bool Changed = false;
+        bool Converged = false;
 
         // We'll store instructions that are safe to hoist in a small vector
         // and then move them out of the loop.
         SmallVector<Instruction *, 8> ToHoist;
+        DenseSet<Value *> LI;
 
-        // For each block in the loop
-        for (BasicBlock *BB : L.blocks()) {
-            // Don't consider the loop header itself if it's also the preheader
-            // (rare, but can happen in certain degenerate CFGs).
-            if (BB == Preheader)
-                continue;
+        while (!Converged) {
+            Converged = true;
+            // For each block in the loop
+            for (BasicBlock *BB : L.blocks()) {
+                // Don't consider the loop header itself if it's also the preheader
+                // (rare, but can happen in certain degenerate CFGs).
+                if (BB == Preheader)
+                    continue;
 
-            // Iterate over all instructions in the block
-            for (Instruction &I : *BB) {
-                if (isLoopInvariantInstruction(I, &L)) {
-                    ToHoist.push_back(&I);
+                // Iterate over all instructions in the block
+                for (Instruction &Inst : *BB) {
+                    if (LI.contains(&Inst) ||                   // Already have marked LI
+                        !isSafeToSpeculativelyExecute(&Inst) || // Cannot hoist effectful instruction
+                        Inst.mayReadOrWriteMemory() ||          // Conservatively, don't hoist any memory ops
+                        !hasLoopInvariantOperands(L, LI, Inst))
+                        continue; // Operands not LI;
+
+                    // Otherwise, we mark this instruction as LI
+                    LI.insert(&Inst);
+                    ToHoist.push_back(&Inst);
+                    Converged = false;
                 }
             }
         }
@@ -88,7 +114,7 @@ class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
         for (Instruction *I : ToHoist) {
             I->moveBefore(Preheader->getTerminator());
             Changed = true;
-            errs() << "  [MySimpleLICM] Hoisted: " << *I << "\n";
+            errs() << "[MySimpleLICM] Hoisted: " << *I << "\n";
         }
 
         if (Changed) {
