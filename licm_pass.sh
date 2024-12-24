@@ -1,16 +1,42 @@
-clang++ -fPIC -shared -o MySimpleLICMPass.so MySimpleLICMPass.cpp \
-    `llvm-config --cxxflags --ldflags --system-libs --libs core passes analysis support`
+#!/bin/bash
 
-clang -Xclang -disable-O0-optnone -O0 -emit-llvm -S test.c -o test.ll
-opt -S -passes=mem2reg test.ll -o test_mem2reg.ll
-clang -O0 test_mem2reg.ll -o test
+# Check if a test file is provided
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <test_file.c>"
+    exit 1
+fi
+
+TEST_FILE=$1
+BASENAME=$(basename "$TEST_FILE" .c)
+
+# Ensure the test file exists
+if [ ! -f "$TEST_FILE" ]; then
+    echo "Error: File $TEST_FILE not found!"
+    exit 1
+fi
+
+# Compile the test file to LLVM IR
+clang -Xclang -disable-O0-optnone -O0 -emit-llvm -S "$TEST_FILE" -o "${BASENAME}.ll"
+
+# Run the mem2reg pass
+opt -S -passes=mem2reg "${BASENAME}.ll" -o "${BASENAME}_mem2reg.ll"
+
+# Compile the processed IR to an executable
+clang -O0 "${BASENAME}_mem2reg.ll" -o "${BASENAME}_exec"
+
+# Run the custom LICM pass
 opt -load-pass-plugin=./MySimpleLICMPass.so -passes="loop(my-simple-licm-pass)" \
-    -S < test_mem2reg.ll > test_licm.ll
-clang -O0 test_licm.ll -o test_licm
+    -S < "${BASENAME}_mem2reg.ll" > "${BASENAME}_licm.ll"
 
+# Compile the LICM processed IR to an executable
+clang -O0 "${BASENAME}_licm.ll" -o "${BASENAME}_licm_exec"
+
+# Run the baseline and LICM versions
 echo "BASELINE"
-./test
+./"${BASENAME}_exec"
 echo "LICM"
-./test_licm
+./"${BASENAME}_licm_exec"
 
-rm test.ll test_mem2reg.ll test_licm.ll test test_licm
+# Clean up intermediate files
+rm "${BASENAME}.ll" "${BASENAME}_mem2reg.ll" "${BASENAME}_licm.ll" \
+   "${BASENAME}_exec" "${BASENAME}_licm_exec"

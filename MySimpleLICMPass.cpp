@@ -1,9 +1,3 @@
-//===- MySimpleLICMPass.cpp - A Simple LICM Pass (New PM) ---------*- C++ -*-===//
-//
-// This is a toy example of Loop-Invariant Code Motion using the new pass manager.
-//
-//===----------------------------------------------------------------------===//
-
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -19,36 +13,13 @@
 
 using namespace llvm;
 
-// A helper to check if an instruction is safe to hoist (simplified).
-static bool isLoopInvariantInstruction(Instruction &I, Loop *L)
-{
-    // 0) Never hoist terminators
-    if (I.isTerminator()) {
-        return false;
-    }
-
-    // 1) If it may have side effects, skip
-    if (I.mayHaveSideEffects()) {
-        return false;
-    }
-
-    // 2) Check if all operands are defined outside the loop (simplified)
-    for (Use &U : I.operands()) {
-        auto *OpInst = dyn_cast<Instruction>(U.get());
-        if (OpInst && L->contains(OpInst))
-            return false;
-    }
-
-    return true;
-}
-
 namespace
 {
 class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
 {
-    bool hasLoopInvariantOperands(const Loop &L, const DenseSet<Value *> &LI, const Instruction &Inst)
+    bool hasLoopInvariantOperands(const Loop &L, const DenseSet<Value *> &LI, const Instruction &I)
     {
-        for (const auto &Use : Inst.operands()) {
+        for (const auto &Use : I.operands()) {
             if (LI.contains(&*Use))
                 // Operand already marked LI
                 continue;
@@ -67,10 +38,8 @@ class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM,
                           LoopStandardAnalysisResults &AR, LPMUpdater &Updater)
     {
-        DominatorTree &DT = AR.DT;
 
-        // If the loop doesn't have a single preheader block, it's harder to do LICM.
-        // In real LICM, we handle multiple preds or zero preds carefully.
+        // Without a preheader, hoisting is not feasible.
         BasicBlock *Preheader = L.getLoopPreheader();
         if (!Preheader) {
             errs() << "[MySimpleLICM] No single loop preheader, skipping.\n";
@@ -80,21 +49,18 @@ class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
         bool Changed = false;
         bool Converged = false;
 
-        // We'll store instructions that are safe to hoist in a small vector
-        // and then move them out of the loop.
+        // Hoist Set
         SmallVector<Instruction *, 8> ToHoist;
+        // Loop Invariant Set
         DenseSet<Value *> LI;
 
         while (!Converged) {
             Converged = true;
-            // For each block in the loop
             for (BasicBlock *BB : L.blocks()) {
                 // Don't consider the loop header itself if it's also the preheader
-                // (rare, but can happen in certain degenerate CFGs).
                 if (BB == Preheader)
                     continue;
 
-                // Iterate over all instructions in the block
                 for (Instruction &Inst : *BB) {
                     if (LI.contains(&Inst) ||                   // Already have marked LI
                         !isSafeToSpeculativelyExecute(&Inst) || // Cannot hoist effectful instruction
@@ -106,6 +72,7 @@ class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
                     LI.insert(&Inst);
                     ToHoist.push_back(&Inst);
                     Converged = false;
+                    Changed = true;
                 }
             }
         }
@@ -117,21 +84,10 @@ class MySimpleLICMPass : public PassInfoMixin<MySimpleLICMPass>
             errs() << "[MySimpleLICM] Hoisted: " << *I << "\n";
         }
 
-        if (Changed) {
-            // We modified the IR, so let LLVM know we potentially changed analyses.
-            // Because we might affect dominance, alias analysis, etc., we invalidate
-            // some of them. For a real pass, you'd be more precise in what you preserve.
-            return PreservedAnalyses::none();
-        } else {
-            return PreservedAnalyses::all();
-        }
+        return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }
 };
 } // end anonymous namespace
-
-//-----------------------------------------------------------------------------
-// New PM Registration
-//-----------------------------------------------------------------------------
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo()

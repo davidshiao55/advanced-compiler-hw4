@@ -3,8 +3,7 @@
 
 int main(void)
 {
-    // Use a larger iteration count so that the loop runs longer
-    const int N = 500000000;
+    const int N = 10000000;
 
     // These constants are trivially loop-invariant
     int b = 5;
